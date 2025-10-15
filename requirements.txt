@@ -1,0 +1,16 @@
+# Core runtime (adjust versions as needed)
+mediapipe
+opencv-python
+numpy
+pandas
+scikit-learn
+
+# Optional deep learning backends (choose one or both and pin later)
+# torch
+# torchvision
+# tensorflow
+
+# Utilities
+pyyaml
+tqdm
+

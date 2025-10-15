@@ -1,0 +1,21 @@
+# Dataset creation and annotation config (placeholder)
+
+raw_data_dir: "data/raw"
+interim_dir: "data/interim"
+processed_dir: "data/processed"
+annotations_dir: "data/annotations"
+
+labels:
+  - anger
+  - disgust
+  - fear
+  - happy
+  - sad
+  - surprise
+  - neutral
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+

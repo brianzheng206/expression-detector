@@ -1,0 +1,14 @@
+# Inference configuration (placeholder)
+
+input:
+  source: "samples/input.jpg"  # file path or camera index
+  resize: [640, 480]
+
+model:
+  backbone: "mediapipe_face_mesh"
+  checkpoint: "models/exp/best.ckpt"
+
+output:
+  save_visualization: true
+  out_dir: "outputs/"
+

@@ -1,0 +1,29 @@
+# Training configuration (placeholder)
+
+experiment_name: "baseline"
+output_dir: "runs/baseline"
+seed: 42
+
+data:
+  train_dir: "data/processed/train"
+  val_dir: "data/processed/val"
+  annotations: "data/annotations/train.jsonl"
+  batch_size: 32
+  num_workers: 4
+
+model:
+  backbone: "mediapipe_face_mesh"
+  classifier: "mlp"
+  num_classes: 7  # e.g., anger, disgust, fear, happy, sad, surprise, neutral
+
+train:
+  epochs: 20
+  learning_rate: 1e-3
+  weight_decay: 1e-5
+  optimizer: "adam"
+  scheduler: null
+
+logging:
+  log_dir: "logs/"
+  checkpoint_every_n_epochs: 1
+
