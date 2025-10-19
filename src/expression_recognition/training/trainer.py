@@ -198,7 +198,7 @@ def train(args: argparse.Namespace) -> None:
 
     # Optim
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2)
 
     best_f1 = -1.0
     epochs_no_improve = 0
@@ -262,7 +262,7 @@ def train(args: argparse.Namespace) -> None:
 
     acc, macro_f1, y_true, y_pred = evaluate(model, val_loader, device)
     print("\nValidation report:")
-    print(classification_report(y_true, y_pred, target_names=classes, digits=4))
+    print(classification_report(y_true, y_pred, target_names=classes, digits=4, labels=range(len(classes))))
     cm = confusion_matrix(y_true, y_pred)
     print("Confusion matrix:\n", cm)
 
