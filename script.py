@@ -50,11 +50,10 @@ class Calibrator:
                for k in self.samples[0].keys()}
         self.mu = {k: float(v.mean()) for k, v in arr.items()}
         self.sd = {k: float(max(1e-6, v.std())) for k, v in arr.items()}
-        # thresholds relative to neutral baseline (tune the K’s if needed)
+        # thresholds relative to neutral baseline - only mouth open and eyebrow raise
         self.th = {
-            "mouth_open": self.mu["MAR"]   + 2.0 * self.sd["MAR"],    # was 1.8
-            "smile":      self.mu["SMILE"] + 2.0 * self.sd["SMILE"],  # was 2.0
-            "brow_raise": self.mu["BROW"]  + 2.2 * self.sd["BROW"],   # was 2.0
+            "mouth_open": self.mu["MAR"]   + 1.0 * self.sd["MAR"],    # very sensitive
+            "brow_raise": self.mu["BROW"]  + 1.1 * self.sd["BROW"],   # very sensitive
         }
         self.ready = True
 
@@ -76,18 +75,7 @@ def compute_features(landmarks, w, h):
     # features (normalized)
     MAR = dist(upper, lower) / iod  # mouth open ratio
     
-    # Smile: measure how much the mouth corners are raised relative to the nose tip
-    # When smiling, the mouth corners should be closer to the nose tip (lower Y values)
-    nose_tip = P(NOSE_TIP)
-    
-    # Calculate the vertical distance from nose tip to mouth corners
-    # When smiling, corners should be closer to nose (smaller distances)
-    nose_to_left = abs(nose_tip[1] - mouthL[1]) / iod
-    nose_to_right = abs(nose_tip[1] - mouthR[1]) / iod
-    
-    # Smile is detected when the mouth corners are closer to the nose tip
-    # We'll use the inverse of the distance (closer = higher smile value)
-    SMILE = (1.0 / (nose_to_left + 1e-6) + 1.0 / (nose_to_right + 1e-6)) * 0.5
+    # Remove smile detection - not needed
     
     # Debug: print landmark positions occasionally
     if hasattr(compute_features, 'debug_counter'):
@@ -95,15 +83,21 @@ def compute_features(landmarks, w, h):
     else:
         compute_features.debug_counter = 0
     
-    if compute_features.debug_counter % 30 == 0:  # Print every 30 frames
-        print(f"Debug - nose_tip: {nose_tip}, mouthL: {mouthL}, mouthR: {mouthR}")
-        print(f"Debug - nose_to_left: {nose_to_left:.4f}, nose_to_right: {nose_to_right:.4f}, SMILE: {SMILE:.4f}")
-    # Brow raise: distance from brow to eyelid (invert y so up -> positive)
-    browL_raise = (eyeLtop[1] - browL[1]) / -iod
-    browR_raise = (eyeRtop[1] - browR[1]) / -iod
+    # Brow raise: measure vertical distance from brow to eye
+    # When raising eyebrows, the brow moves up relative to the eye
+    browL_raise = (eyeLtop[1] - browL[1]) / iod  # positive when brow is above eye
+    browR_raise = (eyeRtop[1] - browR[1]) / iod  # positive when brow is above eye
+    
+    # Average the left and right brow raise values
     BROW = (browL_raise + browR_raise) * 0.5
+    
+    if compute_features.debug_counter % 30 == 0:  # Print every 30 frames
+        print(f"Debug - mouthL: {mouthL}, mouthR: {mouthR}")
+        print(f"Debug - MAR: {MAR:.4f}")
+        print(f"Debug - browL: {browL}, browR: {browR}")
+        print(f"Debug - browL_raise: {browL_raise:.4f}, browR_raise: {browR_raise:.4f}, BROW: {BROW:.4f}")
 
-    return {"MAR": MAR, "SMILE": SMILE, "BROW": BROW}
+    return {"MAR": MAR, "BROW": BROW}
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -115,17 +109,17 @@ def main():
     # Debug mode - set to True to see raw values
     DEBUG = True
 
-    # Smoothers
-    ema_MAR, ema_SMI, ema_BRW = EMA(0.25), EMA(0.25), EMA(0.25)
+    # Smoothers - only for mouth open and eyebrow raise (very responsive)
+    ema_MAR, ema_BRW = EMA(0.7), EMA(0.7)
     # Calibration
     calib = Calibrator()
     state = "calibrating"
     t0 = time.time()
 
-    # Hysteresis to avoid flicker
+    # Hysteresis to avoid flicker - very responsive
     last_label = "neutral"
     hold_counter = 0
-    HOLD_N = 5  # require N consecutive frames before switching label
+    HOLD_N = 1  # require only 1 frame for switching (very responsive)
 
     print("Auto-calibrating: keep a neutral face for ~2 seconds. Press 'c' to recalibrate, 'q' to quit.")
     while True:
@@ -141,59 +135,56 @@ def main():
             for face in res.multi_face_landmarks:
                 feats = compute_features(face.landmark, w, h)
                 sMAR = ema_MAR(feats["MAR"])
-                sSMI = ema_SMI(feats["SMILE"])
                 sBRW = ema_BRW(feats["BROW"])
 
-                if state == "calibrating":
-                    calib.add({"MAR": sMAR, "SMILE": sSMI, "BROW": sBRW})
-                    # ~2s or at least 20 frames
-                    if time.time() - t0 > 2.0 and len(calib.samples) >= 20:
-                        calib.finalize()
-                        state = "running"
-                        # print("Calibration thresholds:", calib.th)
-                else:
-                    # decide label with priority order + thresholds
-                    label = "neutral"
-                    if sMAR > calib.th["mouth_open"]:
-                        label = "mouth_open"
-                    elif sSMI > calib.th["smile"]:
-                        label = "smile"
-                    elif sBRW > calib.th["brow_raise"]:
-                        label = "brow_raise"
+            if state == "calibrating":
+                calib.add({"MAR": sMAR, "BROW": sBRW})
+                # ~2s or at least 20 frames
+                if time.time() - t0 > 2.0 and len(calib.samples) >= 20:
+                    calib.finalize()
+                    state = "running"
+                    # print("Calibration thresholds:", calib.th)
+            else:
+                # decide label with priority order + thresholds
+                label = "neutral"
+                if sMAR > calib.th["mouth_open"]:
+                    label = "mouth_open"
+                elif sBRW > calib.th["brow_raise"]:
+                    label = "brow_raise"
 
-                    # hysteresis
-                    if label != last_label:
-                        hold_counter += 1
-                        if hold_counter >= HOLD_N:
-                            last_label = label
-                            hold_counter = 0
-                    else:
+                # hysteresis
+                if label != last_label:
+                    hold_counter += 1
+                    if hold_counter >= HOLD_N:
+                        last_label = label
                         hold_counter = 0
+                else:
+                    hold_counter = 0
 
-                    # draw face bbox
-                    xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
-                    x1, y1 = int(min(xs) * w), int(min(ys) * h)
-                    x2, y2 = int(max(xs) * w), int(max(ys) * h)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                # draw face bbox
+                xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
+                x1, y1 = int(min(xs) * w), int(min(ys) * h)
+                x2, y2 = int(max(xs) * w), int(max(ys) * h)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-                    # HUD with smoothed values (comment out if noisy)
-                    hud = f"MAR {sMAR:.3f} | SMI {sSMI:.3f} | BRW {sBRW:.3f}"
-                    cv2.putText(frame, hud, (10, h - 12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                # HUD with smoothed values (comment out if noisy)
+                hud = f"MAR {sMAR:.3f} | BRW {sBRW:.3f}"
+                cv2.putText(frame, hud, (10, h - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Debug: show thresholds and current values
+                if DEBUG and calib.ready:
+                    debug_hud = f"MAR Thresh: {calib.th['mouth_open']:.3f} | BRW Thresh: {calib.th['brow_raise']:.3f}"
+                    cv2.putText(frame, debug_hud, (10, h - 32),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                     
-                    # Debug: show thresholds and current values
-                    if DEBUG and calib.ready:
-                        debug_hud = f"Thresh: SMI>{calib.th['smile']:.3f} | Current: {sSMI:.3f}"
-                        cv2.putText(frame, debug_hud, (10, h - 32),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                        
-                        # Additional debug: show raw feature values
-                        raw_feats = compute_features(face.landmark, w, h)
-                        debug_hud2 = f"Raw: MAR={raw_feats['MAR']:.3f} SMI={raw_feats['SMILE']:.3f} BRW={raw_feats['BROW']:.3f}"
-                        cv2.putText(frame, debug_hud2, (10, h - 52),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+                    # Additional debug: show raw feature values
+                    raw_feats = compute_features(face.landmark, w, h)
+                    debug_hud2 = f"Raw: MAR={raw_feats['MAR']:.3f} BRW={raw_feats['BROW']:.3f}"
+                    cv2.putText(frame, debug_hud2, (10, h - 52),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
 
         # UI status
         cv2.putText(frame, f"[{state}]  c=recalibrate, q=quit", (10, 24),
@@ -206,7 +197,7 @@ def main():
         if k == ord('c'):
             # reset calibration + smoothers
             calib.reset(); state = "calibrating"; t0 = time.time()
-            ema_MAR.reset(); ema_SMI.reset(); ema_BRW.reset()
+            ema_MAR.reset(); ema_BRW.reset()
             last_label = "neutral"; hold_counter = 0
 
     cap.release()
