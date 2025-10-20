@@ -53,15 +53,16 @@ class Calibrator:
         self.sd = {k: float(max(1e-6, v.std())) for k, v in arr.items()}
         # thresholds relative to neutral baseline - only mouth open and eyebrow raise
         self.th = {
-            "mouth_open": self.mu["MAR"]   + 2.0 * self.sd["MAR"],    # very conservative for mouth open
-            "brow_raise": self.mu["BROW"]  + 0.8 * self.sd["BROW"],    # more sensitive for brow detection
+            "mouth_open": self.mu["MAR"]   + 3.0 * self.sd["MAR"],    # extremely conservative for mouth open
+            "brow_raise": self.mu["BROW"]  + 1.2 * self.sd["BROW"],    # more conservative for brow detection to reduce false positives
         }
         self.ready = True
 
 def compute_features(landmarks, w, h):
     # to pixel
     def P(i):
-        lm = landmarks[i]; return (lm.x * w, lm.y * h)
+        lm = landmarks[i]
+        return (lm.x * w, lm.y * h)
 
     upper, lower = P(LIPS_UP), P(LIPS_LOW)
     mouthL, mouthR = P(MOUTH_L), P(MOUTH_R)
@@ -96,23 +97,14 @@ def compute_features(landmarks, w, h):
     # features (normalized)
     # Only consider mouth open if head is not significantly tilted
     if head_tilt < 0.5:  # More permissive threshold for head tilt
-        # Use multiple mouth landmarks for more accurate mouth opening detection
-        # Get several points along the mouth opening
+        # Use a more conservative mouth opening detection
+        # Focus on the center of the mouth opening only
         mouth_top_center = P(13)  # upper inner lip center
         mouth_bottom_center = P(14)  # lower inner lip center
-        mouth_top_left = P(12)  # upper lip left
-        mouth_top_right = P(15)  # upper lip right
-        mouth_bottom_left = P(11)  # lower lip left
-        mouth_bottom_right = P(16)  # lower lip right
         
-        # Calculate average mouth opening using multiple points
+        # Only use the center distance for mouth opening
         mouth_center_dist = dist(mouth_top_center, mouth_bottom_center)
-        mouth_left_dist = dist(mouth_top_left, mouth_bottom_left)
-        mouth_right_dist = dist(mouth_top_right, mouth_bottom_right)
-        
-        # Average the distances for more robust detection
-        avg_mouth_dist = (mouth_center_dist + mouth_left_dist + mouth_right_dist) / 3.0
-        MAR = avg_mouth_dist / iod  # mouth open ratio
+        MAR = mouth_center_dist / iod  # mouth open ratio
     else:
         MAR = 0.0  # Don't trigger mouth open if head is tilted
     
@@ -122,16 +114,16 @@ def compute_features(landmarks, w, h):
     browR_raise = (eyeRtop[1] - browR[1]) / iod  # positive when brow is above eye
     
     # Only consider brow raise if head is not significantly tilted
-    # and both brows are raised (not just one side from head tilt)
-    brow_raise_both = (browL_raise + browR_raise) * 0.5
-    brow_raise_symmetry = abs(browL_raise - browR_raise)  # should be small for real brow raise
+    # Allow single eyebrow raise (either left OR right)
+    brow_raise_max = max(browL_raise, browR_raise)  # Use the higher of the two eyebrows
+    brow_raise_symmetry = abs(browL_raise - browR_raise)  # asymmetry check
     
     # Only trigger brow raise if:
-    # 1. Both brows are raised
+    # 1. At least one brow is significantly raised
     # 2. Head is not tilted significantly 
-    # 3. Brow raise is symmetric (not from head tilt)
-    if head_tilt < 0.4 and brow_raise_symmetry < 0.4:  # More permissive thresholds for brow detection
-        BROW = brow_raise_both
+    # 3. Not too asymmetric (to avoid head tilt false positives)
+    if head_tilt < 0.4 and brow_raise_symmetry < 0.6:  # Allow more asymmetry for single brow raise
+        BROW = brow_raise_max  # Use the maximum brow raise value
     else:
         BROW = 0.0  # Don't trigger brow raise if head is tilted
     
@@ -179,15 +171,20 @@ def main():
 
     # Smoothers - only for mouth open and eyebrow raise (very responsive)
     ema_MAR, ema_BRW = EMA(0.7), EMA(0.7)
-    # Calibration
-    calib = Calibrator()
-    state = "calibrating"
-    t0 = time.time()
-
+    
     # Hysteresis to avoid flicker - very responsive
     last_label = "neutral"
     hold_counter = 0
     HOLD_N = 1  # require only 1 frame for switching (very responsive)
+    
+    # Cooldown to prevent jittery updates
+    last_update_time = 0
+    UPDATE_COOLDOWN = 0.8 # seconds between updates
+    
+    # Calibration
+    calib = Calibrator()
+    state = "calibrating"
+    t0 = time.time()
     
     # Image paths
     sus_image = "assets/sus.jpeg"
@@ -198,6 +195,7 @@ def main():
     current_displayed_image = None
 
     print("Auto-calibrating: keep a neutral face for ~2 seconds. Press 'c' to recalibrate, 'q' to quit.")
+    
     while True:
         ok, frame = cap.read()
         if not ok: break
@@ -213,71 +211,79 @@ def main():
                 sMAR = ema_MAR(feats["MAR"])
                 sBRW = ema_BRW(feats["BROW"])
 
-            if state == "calibrating":
-                calib.add({"MAR": sMAR, "BROW": sBRW})
-                # ~2s or at least 20 frames
-                if time.time() - t0 > 2.0 and len(calib.samples) >= 20:
-                    calib.finalize()
-                    state = "running"
-                    # print("Calibration thresholds:", calib.th)
-            else:
-                # decide label with priority order + thresholds
-                label = "neutral"
-                if sMAR > calib.th["mouth_open"]:
-                    label = "mouth_open"
-                elif sBRW > calib.th["brow_raise"]:
-                    label = "brow_raise"
-
-                # hysteresis
-                if label != last_label:
-                    hold_counter += 1
-                    if hold_counter >= HOLD_N:
-                        last_label = label
-                        hold_counter = 0
-                        # Print detection to terminal
-                        print(f"DETECTED: {last_label.upper()}")
-                        
-                        # Show corresponding image (only update when expression changes)
-                        if last_label == "brow_raise" and current_displayed_image != "sus":
-                            if show_image(sus_image, "Expression Detected"):
-                                current_displayed_image = "sus"
-                                print("Showing sus.jpeg")
-                        elif last_label == "mouth_open" and current_displayed_image != "tongue":
-                            if show_image(tongue_image, "Expression Detected"):
-                                current_displayed_image = "tongue"
-                                print("Showing tongue.jpeg")
-                        elif last_label == "neutral" and current_displayed_image != "neutral":
-                            if show_image(neutral_image, "Expression Detected"):
-                                current_displayed_image = "neutral"
-                                print("Showing neutral.jpeg")
+                if state == "calibrating":
+                    calib.add({"MAR": sMAR, "BROW": sBRW})
+                    # ~2s or at least 20 frames
+                    if time.time() - t0 > 2.0 and len(calib.samples) >= 20:
+                        calib.finalize()
+                        state = "running"
+                        # print("Calibration thresholds:", calib.th)
                 else:
-                    hold_counter = 0
+                    # decide label with priority order + thresholds
+                    label = "neutral"
+                    if sMAR > calib.th["mouth_open"]:
+                        label = "mouth_open"
+                    elif sBRW > calib.th["brow_raise"]:
+                        label = "brow_raise"
 
-                # Debug: draw face bbox only in debug mode
-                if DEBUG:
-                    xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
-                    x1, y1 = int(min(xs) * w), int(min(ys) * h)
-                    x2, y2 = int(max(xs) * w), int(max(ys) * h)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    # hysteresis
+                    if label != last_label:
+                        hold_counter += 1
+                        if hold_counter >= HOLD_N:
+                            # Check cooldown before updating
+                            current_time = time.time()
+                            if current_time - last_update_time >= UPDATE_COOLDOWN:
+                                last_label = label
+                                hold_counter = 0
+                                last_update_time = current_time
+                                
+                                # Print detection to terminal
+                                print(f"DETECTED: {last_label.upper()}")
+                                
+                                # Show corresponding image (only update when expression changes)
+                                if last_label == "brow_raise" and current_displayed_image != "sus":
+                                    if show_image(sus_image, "Expression Detected"):
+                                        current_displayed_image = "sus"
+                                        print("Showing sus.jpeg")
+                                elif last_label == "mouth_open" and current_displayed_image != "tongue":
+                                    if show_image(tongue_image, "Expression Detected"):
+                                        current_displayed_image = "tongue"
+                                        print("Showing tongue.jpeg")
+                                elif last_label == "neutral" and current_displayed_image != "neutral":
+                                    if show_image(neutral_image, "Expression Detected"):
+                                        current_displayed_image = "neutral"
+                                        print("Showing neutral.jpeg")
+                            else:
+                                # Still in cooldown, don't update yet
+                                hold_counter = 0
+                    else:
+                        hold_counter = 0
 
-                # HUD with smoothed values (comment out if noisy)
-                hud = f"MAR {sMAR:.3f} | BRW {sBRW:.3f}"
-                cv2.putText(frame, hud, (10, h - 12),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                
-                # Debug: show thresholds and current values
-                if DEBUG and calib.ready:
-                    debug_hud = f"MAR Thresh: {calib.th['mouth_open']:.3f} | BRW Thresh: {calib.th['brow_raise']:.3f}"
-                    cv2.putText(frame, debug_hud, (10, h - 32),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                    
-                    # Additional debug: show raw feature values
-                    raw_feats = compute_features(face.landmark, w, h)
-                    debug_hud2 = f"Raw: MAR={raw_feats['MAR']:.3f} BRW={raw_feats['BROW']:.3f}"
-                    cv2.putText(frame, debug_hud2, (10, h - 52),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+                    # Debug: draw face bbox only in debug mode
+                    if DEBUG:
+                        xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
+                        x1, y1 = int(min(xs) * w), int(min(ys) * h)
+                        x2, y2 = int(max(xs) * w), int(max(ys) * h)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                    # HUD with smoothed values (comment out if noisy)
+                    hud = f"MAR {sMAR:.3f} | BRW {sBRW:.3f}"
+                    cv2.putText(frame, hud, (10, h - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                    # Debug: show thresholds and current values
+                    if DEBUG and calib.ready:
+                        debug_hud = f"MAR Thresh: {calib.th['mouth_open']:.3f} | BRW Thresh: {calib.th['brow_raise']:.3f}"
+                        cv2.putText(frame, debug_hud, (10, h - 32),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                        # Additional debug: show raw feature values
+                        raw_feats = compute_features(face.landmark, w, h)
+                        debug_hud2 = f"Raw: MAR={raw_feats['MAR']:.3f} BRW={raw_feats['BROW']:.3f}"
+                        cv2.putText(frame, debug_hud2, (10, h - 52),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
 
         # UI status
         cv2.putText(frame, f"[{state}]  c=recalibrate, q=quit", (10, 24),
