@@ -2,6 +2,7 @@
 import cv2, math, time
 import mediapipe as mp
 import numpy as np
+import os
 
 # --- Your original landmark indices ---
 LIPS_UP  = 13   # upper inner lip (approx)
@@ -91,13 +92,33 @@ def compute_features(landmarks, w, h):
     # Average the left and right brow raise values
     BROW = (browL_raise + browR_raise) * 0.5
     
-    if compute_features.debug_counter % 30 == 0:  # Print every 30 frames
-        print(f"Debug - mouthL: {mouthL}, mouthR: {mouthR}")
-        print(f"Debug - MAR: {MAR:.4f}")
-        print(f"Debug - browL: {browL}, browR: {browR}")
-        print(f"Debug - browL_raise: {browL_raise:.4f}, browR_raise: {browR_raise:.4f}, BROW: {BROW:.4f}")
+    # Debug output only when enabled
+    if hasattr(compute_features, 'debug_enabled') and compute_features.debug_enabled:
+        if compute_features.debug_counter % 30 == 0:  # Print every 30 frames
+            print(f"Debug - mouthL: {mouthL}, mouthR: {mouthR}")
+            print(f"Debug - MAR: {MAR:.4f}")
+            print(f"Debug - browL: {browL}, browR: {browR}")
+            print(f"Debug - browL_raise: {browL_raise:.4f}, browR_raise: {browR_raise:.4f}, BROW: {BROW:.4f}")
 
     return {"MAR": MAR, "BROW": BROW}
+
+def show_image(image_path, window_name="Detection"):
+    """Display an image in a separate window"""
+    if os.path.exists(image_path):
+        img = cv2.imread(image_path)
+        if img is not None:
+            # Resize image to fit screen better
+            height, width = img.shape[:2]
+            max_width = 800
+            if width > max_width:
+                scale = max_width / width
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                img = cv2.resize(img, (new_width, new_height))
+            
+            cv2.imshow(window_name, img)
+            return True
+    return False
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -107,7 +128,7 @@ def main():
     )
     
     # Debug mode - set to True to see raw values
-    DEBUG = True
+    DEBUG = False
 
     # Smoothers - only for mouth open and eyebrow raise (very responsive)
     ema_MAR, ema_BRW = EMA(0.7), EMA(0.7)
@@ -120,6 +141,14 @@ def main():
     last_label = "neutral"
     hold_counter = 0
     HOLD_N = 1  # require only 1 frame for switching (very responsive)
+    
+    # Image paths
+    sus_image = "assets/sus.jpeg"
+    tongue_image = "assets/tongue.jpeg"
+    neutral_image = "assets/neutral.jpeg"
+    
+    # Track current displayed image to avoid showing same image repeatedly
+    current_displayed_image = None
 
     print("Auto-calibrating: keep a neutral face for ~2 seconds. Press 'c' to recalibrate, 'q' to quit.")
     while True:
@@ -158,16 +187,33 @@ def main():
                     if hold_counter >= HOLD_N:
                         last_label = label
                         hold_counter = 0
+                        # Print detection to terminal
+                        print(f"DETECTED: {last_label.upper()}")
+                        
+                        # Show corresponding image (only update when expression changes)
+                        if last_label == "brow_raise" and current_displayed_image != "sus":
+                            if show_image(sus_image, "Expression Detected"):
+                                current_displayed_image = "sus"
+                                print("Showing sus.jpeg")
+                        elif last_label == "mouth_open" and current_displayed_image != "tongue":
+                            if show_image(tongue_image, "Expression Detected"):
+                                current_displayed_image = "tongue"
+                                print("Showing tongue.jpeg")
+                        elif last_label == "neutral" and current_displayed_image != "neutral":
+                            if show_image(neutral_image, "Expression Detected"):
+                                current_displayed_image = "neutral"
+                                print("Showing neutral.jpeg")
                 else:
                     hold_counter = 0
 
-                # draw face bbox
-                xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
-                x1, y1 = int(min(xs) * w), int(min(ys) * h)
-                x2, y2 = int(max(xs) * w), int(max(ys) * h)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                # Debug: draw face bbox only in debug mode
+                if DEBUG:
+                    xs = [lm.x for lm in face.landmark]; ys = [lm.y for lm in face.landmark]
+                    x1, y1 = int(min(xs) * w), int(min(ys) * h)
+                    x2, y2 = int(max(xs) * w), int(max(ys) * h)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, last_label, (x1, max(0, y1 - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
                 # HUD with smoothed values (comment out if noisy)
                 hud = f"MAR {sMAR:.3f} | BRW {sBRW:.3f}"
@@ -199,6 +245,8 @@ def main():
             calib.reset(); state = "calibrating"; t0 = time.time()
             ema_MAR.reset(); ema_BRW.reset()
             last_label = "neutral"; hold_counter = 0
+            # Reset image tracking but don't close windows
+            current_displayed_image = None
 
     cap.release()
     cv2.destroyAllWindows()
