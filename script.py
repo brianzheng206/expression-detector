@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 # --- Your original landmark indices ---
-LIPS_UP  = 13   # upper inner lip (approx)
+LIPS_UP  = 13   # upper inner lip
 LIPS_LOW = 14   # lower inner lip
 MOUTH_L  = 291  # left mouth corner
 MOUTH_R  = 61   # right mouth corner
@@ -53,8 +53,8 @@ class Calibrator:
         self.sd = {k: float(max(1e-6, v.std())) for k, v in arr.items()}
         # thresholds relative to neutral baseline - only mouth open and eyebrow raise
         self.th = {
-            "mouth_open": self.mu["MAR"]   + 1.0 * self.sd["MAR"],    # very sensitive
-            "brow_raise": self.mu["BROW"]  + 1.1 * self.sd["BROW"],   # very sensitive
+            "mouth_open": self.mu["MAR"]   + 2.0 * self.sd["MAR"],    # very conservative for mouth open
+            "brow_raise": self.mu["BROW"]  + 0.8 * self.sd["BROW"],    # more sensitive for brow detection
         }
         self.ready = True
 
@@ -73,9 +73,6 @@ def compute_features(landmarks, w, h):
     er = eye_center(landmarks, w, h, EYE_R_IN, EYE_R_OUT)
     iod = dist(el, er) + 1e-6
 
-    # features (normalized)
-    MAR = dist(upper, lower) / iod  # mouth open ratio
-    
     # Remove smile detection - not needed
     
     # Debug: print landmark positions occasionally
@@ -84,13 +81,59 @@ def compute_features(landmarks, w, h):
     else:
         compute_features.debug_counter = 0
     
+    # Head tilt detection - check if head is tilted significantly
+    # Use nose tip and eye centers to detect tilt
+    nose_tip = P(NOSE_TIP)
+    eyeL_center = eye_center(landmarks, w, h, EYE_L_IN, EYE_L_OUT)
+    eyeR_center = eye_center(landmarks, w, h, EYE_R_IN, EYE_R_OUT)
+    
+    # Calculate head tilt angle - use a more reasonable measure
+    # Check if nose is significantly off-center between eyes
+    eye_center_x = (eyeL_center[0] + eyeR_center[0]) / 2
+    nose_to_eye_center_x = abs(nose_tip[0] - eye_center_x)
+    head_tilt = nose_to_eye_center_x / iod  # normalize by inter-ocular distance
+    
+    # features (normalized)
+    # Only consider mouth open if head is not significantly tilted
+    if head_tilt < 0.5:  # More permissive threshold for head tilt
+        # Use multiple mouth landmarks for more accurate mouth opening detection
+        # Get several points along the mouth opening
+        mouth_top_center = P(13)  # upper inner lip center
+        mouth_bottom_center = P(14)  # lower inner lip center
+        mouth_top_left = P(12)  # upper lip left
+        mouth_top_right = P(15)  # upper lip right
+        mouth_bottom_left = P(11)  # lower lip left
+        mouth_bottom_right = P(16)  # lower lip right
+        
+        # Calculate average mouth opening using multiple points
+        mouth_center_dist = dist(mouth_top_center, mouth_bottom_center)
+        mouth_left_dist = dist(mouth_top_left, mouth_bottom_left)
+        mouth_right_dist = dist(mouth_top_right, mouth_bottom_right)
+        
+        # Average the distances for more robust detection
+        avg_mouth_dist = (mouth_center_dist + mouth_left_dist + mouth_right_dist) / 3.0
+        MAR = avg_mouth_dist / iod  # mouth open ratio
+    else:
+        MAR = 0.0  # Don't trigger mouth open if head is tilted
+    
     # Brow raise: measure vertical distance from brow to eye
     # When raising eyebrows, the brow moves up relative to the eye
     browL_raise = (eyeLtop[1] - browL[1]) / iod  # positive when brow is above eye
     browR_raise = (eyeRtop[1] - browR[1]) / iod  # positive when brow is above eye
     
-    # Average the left and right brow raise values
-    BROW = (browL_raise + browR_raise) * 0.5
+    # Only consider brow raise if head is not significantly tilted
+    # and both brows are raised (not just one side from head tilt)
+    brow_raise_both = (browL_raise + browR_raise) * 0.5
+    brow_raise_symmetry = abs(browL_raise - browR_raise)  # should be small for real brow raise
+    
+    # Only trigger brow raise if:
+    # 1. Both brows are raised
+    # 2. Head is not tilted significantly 
+    # 3. Brow raise is symmetric (not from head tilt)
+    if head_tilt < 0.4 and brow_raise_symmetry < 0.4:  # More permissive thresholds for brow detection
+        BROW = brow_raise_both
+    else:
+        BROW = 0.0  # Don't trigger brow raise if head is tilted
     
     # Debug output only when enabled
     if hasattr(compute_features, 'debug_enabled') and compute_features.debug_enabled:
@@ -99,6 +142,7 @@ def compute_features(landmarks, w, h):
             print(f"Debug - MAR: {MAR:.4f}")
             print(f"Debug - browL: {browL}, browR: {browR}")
             print(f"Debug - browL_raise: {browL_raise:.4f}, browR_raise: {browR_raise:.4f}, BROW: {BROW:.4f}")
+            print(f"Debug - head_tilt: {head_tilt:.4f}, brow_symmetry: {brow_raise_symmetry:.4f}")
 
     return {"MAR": MAR, "BROW": BROW}
 
@@ -129,6 +173,9 @@ def main():
     
     # Debug mode - set to True to see raw values
     DEBUG = False
+    
+    # Set debug flag for compute_features function
+    compute_features.debug_enabled = DEBUG
 
     # Smoothers - only for mouth open and eyebrow raise (very responsive)
     ema_MAR, ema_BRW = EMA(0.7), EMA(0.7)
