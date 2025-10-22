@@ -262,8 +262,11 @@ def train(args: argparse.Namespace) -> None:
 
     acc, macro_f1, y_true, y_pred = evaluate(model, val_loader, device)
     print("\nValidation report:")
-    print(classification_report(y_true, y_pred, target_names=classes, digits=4, labels=range(len(classes))))
-    cm = confusion_matrix(y_true, y_pred)
+    # Get labels that are actually present in predictions
+    unique_labels = sorted(set(y_true) | set(y_pred))
+    present_classes = [classes[i] for i in unique_labels if i < len(classes)]
+    print(classification_report(y_true, y_pred, labels=unique_labels, target_names=present_classes, digits=4, zero_division=0))
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(classes))))
     print("Confusion matrix:\n", cm)
 
     # Export ONNX if requested

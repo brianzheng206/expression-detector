@@ -53,7 +53,7 @@ class Calibrator:
         self.sd = {k: float(max(1e-6, v.std())) for k, v in arr.items()}
         # thresholds relative to neutral baseline - only mouth open and eyebrow raise
         self.th = {
-            "mouth_open": self.mu["MAR"]   + 3.0 * self.sd["MAR"],    # extremely conservative for mouth open
+            "mouth_open": self.mu["MAR"]   + 2.5 * self.sd["MAR"],    # very conservative for mouth open
             "brow_raise": self.mu["BROW"]  + 1.2 * self.sd["BROW"],    # more conservative for brow detection to reduce false positives
         }
         self.ready = True
@@ -97,14 +97,14 @@ def compute_features(landmarks, w, h):
     # features (normalized)
     # Only consider mouth open if head is not significantly tilted
     if head_tilt < 0.5:  # More permissive threshold for head tilt
-        # Use a more conservative mouth opening detection
-        # Focus on the center of the mouth opening only
-        mouth_top_center = P(13)  # upper inner lip center
-        mouth_bottom_center = P(14)  # lower inner lip center
+        # Use outer lip landmarks for more accurate mouth opening detection
+        # These landmarks are on the outer edge of the lips, not the inner edge
+        mouth_top_outer = P(12)  # upper outer lip center
+        mouth_bottom_outer = P(15)  # lower outer lip center
         
-        # Only use the center distance for mouth opening
-        mouth_center_dist = dist(mouth_top_center, mouth_bottom_center)
-        MAR = mouth_center_dist / iod  # mouth open ratio
+        # Calculate mouth opening using outer lip distance
+        mouth_outer_dist = dist(mouth_top_outer, mouth_bottom_outer)
+        MAR = mouth_outer_dist / iod  # mouth open ratio
     else:
         MAR = 0.0  # Don't trigger mouth open if head is tilted
     
@@ -164,7 +164,7 @@ def main():
     )
     
     # Debug mode - set to True to see raw values
-    DEBUG = False
+    DEBUG = True
     
     # Set debug flag for compute_features function
     compute_features.debug_enabled = DEBUG
@@ -195,6 +195,9 @@ def main():
     current_displayed_image = None
 
     print("Auto-calibrating: keep a neutral face for ~2 seconds. Press 'c' to recalibrate, 'q' to quit.")
+    
+    # Create resizable window
+    cv2.namedWindow("Heuristic Expressions (MediaPipe, Calibrated)", cv2.WINDOW_NORMAL)
     
     while True:
         ok, frame = cap.read()
@@ -286,7 +289,7 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
 
         # UI status
-        cv2.putText(frame, f"[{state}]  c=recalibrate, q=quit", (10, 24),
+        cv2.putText(frame, f"[{state}]", (10, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         cv2.imshow("Heuristic Expressions (MediaPipe, Calibrated)", frame)
