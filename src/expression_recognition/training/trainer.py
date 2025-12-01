@@ -173,6 +173,15 @@ def train(args: argparse.Namespace) -> None:
     else:
         classes = [f"class_{i}" for i in range(num_classes)]
 
+    # Feature standardization (z-score) using train set statistics
+    flat_tr = Xtr.reshape(-1, D)
+    mu = flat_tr.mean(axis=0).astype(np.float32)
+    sigma = flat_tr.std(axis=0).astype(np.float32)
+    sigma[sigma < 1e-6] = 1e-6
+
+    Xtr = (Xtr - mu) / sigma
+    Xval = (Xval - mu) / sigma
+
     # Dataloaders
     train_ds = TensorDataset(torch.from_numpy(Xtr), torch.from_numpy(ytr))
     val_ds = TensorDataset(torch.from_numpy(Xval), torch.from_numpy(yval))
@@ -245,6 +254,10 @@ def train(args: argparse.Namespace) -> None:
                     "dropout": args.dropout,
                     "bidirectional": bool(args.bidirectional),
                     "classes": classes,
+                    "norm": {
+                        "mu": mu.tolist(),
+                        "sigma": sigma.tolist(),
+                    },
                 },
                 "val_macro_f1": macro_f1,
             }, ckpt_dir / "best.pt")

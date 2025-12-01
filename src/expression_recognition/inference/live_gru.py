@@ -19,7 +19,7 @@ import argparse
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, List, Tuple
+from typing import Deque, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -47,7 +47,7 @@ class InferenceConfig:
     device: str
 
 
-def _load_checkpoint(ckpt_path: Path, device: torch.device) -> Tuple[GRUExpr, List[str], int]:
+def _load_checkpoint(ckpt_path: Path, device: torch.device) -> Tuple[GRUExpr, List[str], int, Optional[Tuple[np.ndarray, np.ndarray]]]:
     state = torch.load(ckpt_path, map_location=device)
     cfg = state.get("config", {})
     in_dim = int(cfg.get("in_dim", 936))
@@ -57,6 +57,14 @@ def _load_checkpoint(ckpt_path: Path, device: torch.device) -> Tuple[GRUExpr, Li
     dropout = float(cfg.get("dropout", 0.0))
     bidirectional = bool(cfg.get("bidirectional", False))
     classes = cfg.get("classes") or [f"class_{i}" for i in range(num_classes)]
+    norm = None
+    if "norm" in cfg:
+        try:
+            mu = np.asarray(cfg["norm"]["mu"], dtype=np.float32)
+            sigma = np.asarray(cfg["norm"]["sigma"], dtype=np.float32)
+            norm = (mu, sigma)
+        except Exception:
+            norm = None
 
     model = GRUExpr(
         in_dim=in_dim,
@@ -68,7 +76,7 @@ def _load_checkpoint(ckpt_path: Path, device: torch.device) -> Tuple[GRUExpr, Li
     ).to(device)
     model.load_state_dict(state["state_dict"])  # type: ignore[index]
     model.eval()
-    return model, classes, in_dim
+    return model, classes, in_dim, norm
 
 
 def _make_feature(
@@ -117,7 +125,7 @@ def main(argv: List[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
-    model, classes, in_dim = _load_checkpoint(args.ckpt, device)
+    model, classes, in_dim, norm = _load_checkpoint(args.ckpt, device)
 
     # Face Mesh
     fm_cfg = FaceMeshConfig(max_num_faces=1, refine_landmarks=args.refine)
@@ -160,6 +168,14 @@ def main(argv: List[str] | None = None) -> None:
         # Predict when buffer full
         if len(buf) == T:
             x_seq = np.stack(list(buf), axis=0).astype(np.float32)
+            # Apply z-score standardization if available (stats from training set)
+            if norm is not None:
+                mu, sigma = norm
+                # If mismatch, truncate to match model input dimension
+                if mu.size > in_dim:
+                    mu = mu[:in_dim]
+                    sigma = sigma[:in_dim]
+                x_seq = (x_seq - mu) / sigma
             idx, conf, probs = _predict(model, x_seq, device)
             last_pred = (classes[idx], conf)
 
@@ -181,4 +197,3 @@ def main(argv: List[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
